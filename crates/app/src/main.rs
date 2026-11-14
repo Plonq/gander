@@ -115,10 +115,7 @@ enum SessionCompletion {
 
 const MONO: &str = "Menlo";
 // Release CI supplies the tag version to both the binary and app bundle.
-const APP_VERSION: &str = match option_env!("GANDER_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+const APP_VERSION: Option<&str> = option_env!("GANDER_VERSION");
 
 /// Diff pane font size in px, adjustable at runtime (cmd-+ / cmd-- / cmd-0).
 /// A process-wide cell rather than a plumbed parameter: it feeds free
@@ -7085,7 +7082,10 @@ impl ReviewApp {
                 div()
                     .flex_shrink_0()
                     .text_color(theme::overlay0(cx))
-                    .child(format!("v{APP_VERSION}")),
+                    .child(match APP_VERSION {
+                        Some(version) => format!("v{version}"),
+                        None => "dev".to_string(),
+                    }),
             )
     }
     /// Blank list slots shared by the diff's scroll range and minimap.
