@@ -114,6 +114,8 @@ enum SessionCompletion {
 }
 
 const MONO: &str = "Menlo";
+// Release CI supplies the tag version to both the binary and app bundle.
+const APP_VERSION: Option<&str> = option_env!("GANDER_VERSION");
 
 /// Diff pane font size in px, adjustable at runtime (cmd-+ / cmd-- / cmd-0).
 /// A process-wide cell rather than a plumbed parameter: it feeds free
@@ -7005,7 +7007,7 @@ impl ReviewApp {
 
     fn render_footer(&self, cx: &gpui::App) -> impl IntoElement {
         let hint = |keys: &[&'static str], label: &'static str| {
-            let mut hint = div().flex().items_center().gap_1();
+            let mut hint = div().flex().flex_shrink_0().items_center().gap_1();
             for key in keys {
                 hint = hint.child(Kbd::new(Keystroke::parse(key).unwrap()));
             }
@@ -7016,16 +7018,12 @@ impl ReviewApp {
             )
         };
         let mut footer = div()
-            .h(px(28.))
-            .flex_shrink_0()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             .gap_4()
-            .px_3()
-            .bg(theme::mantle(cx))
-            .border_t_1()
-            .border_color(theme::surface0(cx))
-            .text_size(px(12.));
+            .overflow_hidden();
         // The queue screen's hints differ from the diff's: j/k drive the
         // rows, and nothing about hunks or files applies yet.
         if self.show_queue {
@@ -7068,7 +7066,27 @@ impl ReviewApp {
                 .child(hint(&["r"], "refresh"))
                 .child(hint(&["cmd-enter"], "review"));
         }
-        footer
+        div()
+            .h(px(28.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_3()
+            .bg(theme::mantle(cx))
+            .border_t_1()
+            .border_color(theme::surface0(cx))
+            .text_size(px(12.))
+            .child(footer)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(theme::overlay0(cx))
+                    .child(match APP_VERSION {
+                        Some(version) => format!("v{version}"),
+                        None => "dev".to_string(),
+                    }),
+            )
     }
     /// Blank list slots shared by the diff's scroll range and minimap.
     /// Composers reserve their own rows at their anchors, not in this tail.
