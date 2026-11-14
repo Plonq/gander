@@ -24,7 +24,7 @@ Requires **Apple Silicon** and **macOS 15 or later**. GitHub reviews use your [G
 
 ### Install
 
-1. Download [Gander.dmg](https://github.com/Plonq/gander/releases/download/latest/Gander.dmg) from the [latest release downloads](https://github.com/Plonq/gander/releases/tag/latest).
+1. Download [Gander.dmg](https://github.com/Plonq/gander/releases/latest/download/Gander.dmg) from the [latest release downloads](https://github.com/Plonq/gander/releases/latest).
 2. Open the disk image and drag **Gander** into **Applications**.
 3. Install the GitHub CLI if needed, then sign in:
 
