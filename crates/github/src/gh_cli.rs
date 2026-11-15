@@ -456,7 +456,7 @@ impl<P: GhProcess> GhCliClient<P> {
             }
             if count >= 1000 {
                 return Err(ClientError::Failed(
-                    "Review history exceeds GitHub's search limit. Narrow by organization or repository.".into(),
+                    "Review history exceeds GitHub's search limit.".into(),
                 ));
             }
         }
@@ -5360,7 +5360,8 @@ mod tests {
             2,
             "one viewer check and one batched page, not one subprocess per PR"
         );
-        assert!(calls[1][3].contains("is:pr reviewed-by:@me org:octocat sort:updated-desc"));
+        assert!(calls[1][3].contains("is:pr reviewed-by:@me -author:@me sort:updated-desc"));
+        assert!(!calls[1][3].contains("org:octocat"));
         assert!(calls[1][3].contains("author:\"me\""));
         assert!(!calls[1][3].contains("is:open"));
         assert!(!calls[1][3].contains("timelineItems"));

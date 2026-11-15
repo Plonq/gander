@@ -335,6 +335,9 @@ pub(crate) fn queue_chips(
     search: &github::QueueSearch,
 ) -> Vec<QueueChipGroup> {
     use github::QueueFilterKind::{Org, Repo};
+    if search.is_past_reviews() {
+        return Vec::new();
+    }
     [Org, Repo]
         .into_iter()
         .filter_map(|kind| {
@@ -818,6 +821,18 @@ mod tests {
             github::QueueFilter::repo("globex/thing")
         );
         assert_eq!(groups.iter().map(|group| group.hidden).sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn past_reviews_offer_no_filter_chips() {
+        let prs = vec![
+            queued(1, "acme/widgets", "alice"),
+            queued(2, "globex/thing", "bob"),
+        ];
+        let search = github::QueueSearch::review_requested()
+            .filtered_by(github::QueueFilter::org("acme"))
+            .with_past_reviews(true);
+        assert!(queue_chips(&prs, &search).is_empty());
     }
 
     /// A dimension with a single value has nothing to narrow: it stays

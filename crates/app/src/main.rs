@@ -2581,7 +2581,7 @@ impl ReviewApp {
     }
 
     /// A different view must never display the old view's rows, even while
-    /// loading or offline. Keep filters and the default queue's sort preference.
+    /// loading or offline. Preserve filters and sort for the pending queue.
     fn queue_toggle_past_reviews(&mut self, cx: &mut Context<Self>) {
         if !self.show_queue {
             return;
@@ -2626,7 +2626,7 @@ impl ReviewApp {
     /// the active chip lifts that dimension again — the one-glance rule
     /// runs both ways, and clearing is never more than one click.
     fn queue_toggle_filter(&mut self, filter: github::QueueFilter, cx: &mut Context<Self>) {
-        if !self.show_queue {
+        if !self.show_queue || self.queue.search.is_past_reviews() {
             return;
         }
         self.queue.search = if self.queue.search.filters().contains(&filter) {
@@ -11756,7 +11756,12 @@ mod tests {
             let rows = if query.contains("reviewed-by:@me") {
                 (1..=14)
                     .map(|number| {
-                        let mut pr = queued(number, "acme/widgets", "alice");
+                        let repository = if number % 2 == 0 {
+                            "acme/widgets"
+                        } else {
+                            "globex/thing"
+                        };
+                        let mut pr = queued(number, repository, "alice");
                         pr.reviewed_at = Some(format!("2026-03-{number:02}T00:00:00Z"));
                         pr
                     })
@@ -14200,6 +14205,11 @@ mod tests {
         });
         vcx.run_until_parked();
         click_toggle(&mut vcx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds("queue-chip-0").is_none());
+        assert!(vcx.debug_bounds("queue-sort-toggle").is_none());
         vcx.cx.update(|cx| {
             let this = app.read(cx);
             assert!(this.queue.search.is_past_reviews());
@@ -14234,7 +14244,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|(query, _)| query == "is:pr reviewed-by:@me"));
+            .any(|(query, _)| query == "is:pr reviewed-by:@me -author:@me"));
     }
 
     #[gpui::test]

@@ -284,7 +284,7 @@ impl QueueSearch {
         }
     }
 
-    /// Switch queue views without losing the current filters or pending sort.
+    /// Switch queue views, preserving filters and sort for the pending queue.
     pub fn with_past_reviews(self, past: bool) -> Self {
         Self {
             preset: if past {
@@ -352,9 +352,13 @@ impl QueueSearch {
     }
 
     /// The chips currently narrowing the search, in compile order: org,
-    /// then repo.
+    /// then repo. Past reviews always show history across all repositories.
     pub fn filters(&self) -> &[QueueFilter] {
-        &self.filters
+        if self.is_past_reviews() {
+            &[]
+        } else {
+            &self.filters
+        }
     }
 
     /// The current queue's sort preference. Past reviews always use latest
@@ -370,9 +374,9 @@ impl QueueSearch {
     pub fn query(&self) -> String {
         let mut query = match self.preset {
             QueuePreset::ReviewRequested => "is:pr is:open review-requested:@me".to_string(),
-            QueuePreset::PastReviews => "is:pr reviewed-by:@me".to_string(),
+            QueuePreset::PastReviews => "is:pr reviewed-by:@me -author:@me".to_string(),
         };
-        for filter in &self.filters {
+        for filter in self.filters() {
             query.push(' ');
             query.push_str(&filter.qualifier());
         }
@@ -925,6 +929,19 @@ mod tests {
         assert_eq!(search.query(), "is:pr is:open review-requested:@me");
         assert_eq!(search.sort(), ("review-requested", "asc"));
         assert_eq!(search.ordering(), QueueSort::ReviewRequestedAscending);
+    }
+
+    #[test]
+    fn past_reviews_exclude_own_prs_and_suspend_pending_queue_filters() {
+        let pending = QueueSearch::review_requested()
+            .filtered_by(QueueFilter::org("acme"))
+            .filtered_by(QueueFilter::repo("acme/widgets"))
+            .sorted_by(QueueSort::CreatedAscending);
+        let past = pending.clone().with_past_reviews(true);
+        assert_eq!(past.query(), "is:pr reviewed-by:@me -author:@me");
+        assert!(past.filters().is_empty());
+        assert_eq!(past.sort(), ("reviewed", "desc"));
+        assert_eq!(past.with_past_reviews(false), pending);
     }
 
     /// Re-sorting changes the sort spec, never the set of PRs.
