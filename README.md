@@ -2,21 +2,44 @@
 
 A fast, native macOS app for reviewing GitHub pull requests.
 
-Gander is personal software with a singular focus: make it easier to understand PRs and give good human reviews. It starts with your pending review requests and puts the code front and centre. It is not a general-purpose GitHub client or an IDE.
+Gander is personal software with a singular focus: provide the context you need to understand the PR and therefore perform a quality human review.
 
-The priorities are two features GitHub itself lacks: **fast diff navigation** and **full-file context** (by default). Keep the information dense, leave out what doesn't help the review, and stay out of the way.
+This came about out of frustration with GitHub's PR UI. Third party clients like the GitHub plugin in JetBrains' IDEs and the official one in VSCode also fell short in different ways. Gander addresses all these, and aims to provide all the good parts of GitHub's own interface, without the two big shortcomings: performance, and lack of context. I  designed this around those two things: fast navigation, and full file context.
 
-![Screenshot of Gander, showing an open PR and the diff view](docs/screenshot1.png)
+![Screenshot of Gander, showing an open PR and the diff view](docs/screenshot1.jpg)
 
 ## Features
 
-- **Your review queue.** See pending requests, filter by organisation or repository, and revisit recent reviews.
-- **Full files, not just hunks.** Unified or split diffs with syntax highlighting, word-level changes, image comparisons, and surrounding code for context.
-- **Fast navigation.** Keyboard shortcuts, a fuzzy file filter, diff-wide search, and a minimap. Pick up where you left off with restored reviews, positions and unfinished comments.
-- **Focus on what's new.** See changes since your last review, hide whitespace changes, fold unchanged code, and mark files as viewed on GitHub.
-- **The whole conversation.** Read the PR description, discussion, and review threads, including images and videos, alongside the code.
-- **Review without switching tools.** Write inline and multi-line comments, reply to and resolve threads, keep drafts, and submit approvals or change requests.
-- **Local diffs too.** Open a local repository to inspect its changes without a GitHub PR.
+### Pull Requests
+
+- Uses your existing GitHub CLI (`gh`)
+- Review queue, recently reviewed PRs, or open a PR directly with a link/ID
+- View the PR description, timeline, conversation, commits, CI status
+- Copy the PR link, open it in GitHub, submit review, review changes since your last review
+- Mark files viewed/unviewed
+- All the commenting features:
+  - Multi-line
+  - Top level and inline
+  - Resolve/unresolve (resolved are collapsed by default)
+  - Inline image, video, and mermaid, including opening media expanded (but not full screen!)
+  - Reply, edit, and delete
+  - Reactions
+  - Comment on any line, not just within hunks
+  - Preview comment rendering before submit
+
+### Diffs
+
+- Full files by default
+- Show whitespace, toggle split/unified, hide unchanged lines
+- Tree view for files, with fuzzy search
+- Find keywords in the current file, all files, or only within the PRs diff, with minimap highlighting of matches
+- Scroll locations are saved per-file, to allow easy switching without losing your place
+
+### Other
+
+- Most actions have a keyboard shortcut - moving between files & hunks, selecting lines and commenting, toggling diff options, etc
+- Navigation history - go back through your own history (to quickly switch between two files, for example)
+- Sessions are saved so quitting and re-opening will restore where you were before, including half-written comments, open files, and scroll positions
 
 ## Quick Start
 
@@ -27,21 +50,16 @@ Requires **Apple Silicon** and **macOS 15 or later**. GitHub reviews use your [G
 1. Download [Gander.dmg](https://github.com/Plonq/gander/releases/latest/download/Gander.dmg) from the [latest release downloads](https://github.com/Plonq/gander/releases/latest).
 2. Open the disk image and drag **Gander** into **Applications**.
 3. Install the GitHub CLI if needed, then sign in:
-
    ```sh
-   brew install gh
-   gh auth login
+    brew install gh
+    gh auth login
    ```
 
 Builds are **not notarised**. If macOS blocks Gander, attempt to open the installed
 app, then choose **System Settings → Privacy & Security → Open Anyway**.
 Installed builds check for updates on launch and hourly in the background;
 **Gander → Check for Updates…** checks manually. **Restart to update**
-installs a ready update and restores your review session. Updates can also install
-on normal quit. Publishing requires no paid Apple Developer account; see
-[release workflow and one-time update-key setup](docs/releases.md).
-Releases are explicit: run `./scripts/release.sh` after merging your changes to
-`main`. It suggests a version and creates the tag; CI publishes the DMG and update.
+installs a ready update and restores your review session. 
 
 ### Review your first PR
 
@@ -51,15 +69,6 @@ Releases are explicit: run `./scripts/release.sh` after merging your changes to
 4. Add comments to a pending review, then choose **Finish review** to approve, request changes, or submit a comment-only review.
 
 **⌘O** opens a PR by URL or identifier, or a local repository by path. **`U`** returns to the queue without closing your open reviews.
-
-### Session restoration
-
-Gander saves your session on every quit and restores it on launch. Open reviews, positions, view settings and unfinished comment/review text come back; nothing is automatically submitted. Changed sessions are also checkpointed every five seconds for crash recovery.
-
-For a fresh start, hold **Shift** while launching until the window appears.
-Explicit PR/path arguments also skip restoration for that launch. These fresh
-launches leave the previous snapshot untouched while running; quitting replaces
-it with the fresh session. Normal launches resume saving checkpoints.
 
 ### Build from source
 
@@ -85,7 +94,7 @@ override, Gander uses `~/Library/Application Support/Gander/store.db`.
 
 ## Tech Stack
 
-Built in [Rust](https://www.rust-lang.org/) with [GPUI](https://www.gpui.rs/) for the native UI.
+Built in [Rust](https://www.rust-lang.org/) with [GPUI](https://www.gpui.rs/) for the native UI. Uses `gh` for the GitHub API.
 
 ## Acknowledgements & License
 
