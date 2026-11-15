@@ -9,6 +9,16 @@ struct Origin {
 }
 impl Origin {
     fn new(total: usize) -> Self {
+        Self::with_gate(total, None)
+    }
+    fn with_gate(total: usize, gate: Option<Arc<AtomicUsize>>) -> Self {
+        Self::with_gates(total, gate, None)
+    }
+    fn with_gates(
+        total: usize,
+        gate: Option<Arc<AtomicUsize>>,
+        range_gate: Option<Arc<AtomicUsize>>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/clip.mp4", listener.local_addr().unwrap());
@@ -21,6 +31,9 @@ impl Origin {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
                         let seen = seen.clone();
+                        let gate = gate.clone();
+                        let range_gate = range_gate.clone();
+                        let stopped = stopped.clone();
                         std::thread::spawn(move || {
                             // macOS inherits the listener's nonblocking mode. Wait for
                             // request bytes instead of closing on a transient WouldBlock.
@@ -66,6 +79,21 @@ impl Origin {
                             let _ = socket.write_all(b"\r\n");
                             let mut at = start;
                             while at <= end {
+                                let active_gate = if range.is_none() {
+                                    gate.as_ref()
+                                } else if start > 0 {
+                                    range_gate.as_ref()
+                                } else {
+                                    None
+                                };
+                                if let Some(gate) = active_gate {
+                                    while at / CHUNK >= gate.load(Ordering::Acquire) as u64 {
+                                        if stopped.load(Ordering::Relaxed) {
+                                            return;
+                                        }
+                                        std::thread::sleep(Duration::from_millis(2));
+                                    }
+                                }
                                 let n = (end - at + 1).min(64 * 1024) as usize;
                                 let bytes: Vec<_> =
                                     (at..at + n as u64).map(|i| (i % 251) as u8).collect();
@@ -238,4 +266,166 @@ fn local_endpoint_rejects_unknown_paths_and_invalid_ranges() {
     }
     assert_eq!(parse_range("bytes=-10", 100).unwrap(), (90, 99));
     assert_eq!(parse_range("bytes=20-200", 100).unwrap(), (20, 99));
+}
+
+#[test]
+fn nearby_seeks_wait_for_the_sequential_download_without_duplicate_requests() {
+    let gate = Arc::new(AtomicUsize::new(1));
+    let origin = Origin::with_gate(12 * CHUNK as usize, Some(gate.clone()));
+    let transfer = Arc::<Transfer>::default();
+    let file = prepare(origin.url.clone(), transfer.clone()).unwrap();
+    file.start();
+    until(|| origin.requests.lock().unwrap().len() >= 2);
+    let endpoint = file.source().to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = agent()
+            .get(&endpoint)
+            .set("Range", &format!("bytes={}-{}", 2 * CHUNK, 2 * CHUNK + 31))
+            .call()
+            .unwrap()
+            .into_reader()
+            .read_to_end(&mut bytes);
+        tx.send((result, bytes)).unwrap();
+    });
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(150)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(origin.requests.lock().unwrap().len(), 2);
+    assert_eq!(transfer.bytes.load(Ordering::Relaxed), CHUNK);
+
+    // Seeking back to cached data is possible while the nearby seek waits.
+    let mut cached = Vec::new();
+    agent()
+        .get(file.source())
+        .set("Range", "bytes=0-31")
+        .call()
+        .unwrap()
+        .into_reader()
+        .read_to_end(&mut cached)
+        .unwrap();
+    assert_eq!(cached, (0..32).collect::<Vec<u8>>());
+    gate.store(12, Ordering::Release);
+    let (result, bytes) = rx.recv_timeout(Duration::from_secs(8)).unwrap();
+    result.unwrap();
+    assert_eq!(
+        bytes,
+        (2 * CHUNK..2 * CHUNK + 32)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>()
+    );
+    reader.join().unwrap();
+    until(|| transfer.complete.load(Ordering::Acquire));
+    assert_eq!(
+        *origin.requests.lock().unwrap(),
+        vec![Some(format!("bytes=0-{}", CHUNK - 1)), None]
+    );
+}
+
+#[test]
+fn abandoned_unbuffered_seeks_release_loopback_connections() {
+    let gate = Arc::new(AtomicUsize::new(0));
+    let origin = Origin::with_gate(12 * CHUNK as usize, Some(gate.clone()));
+    let file = prepare(origin.url.clone(), Arc::default()).unwrap();
+    file.start();
+    // More than the server's four-client limit. Each response sends headers,
+    // then waits on uncached bytes until its reader disconnects.
+    for _ in 0..8 {
+        let response = agent()
+            .get(file.source())
+            .set("Range", &format!("bytes={}-", 2 * CHUNK))
+            .call()
+            .unwrap();
+        drop(response);
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let mut bytes = Vec::new();
+    agent()
+        .get(file.source())
+        .set("Range", "bytes=0-31")
+        .call()
+        .unwrap()
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, (0..32).collect::<Vec<u8>>());
+    assert_eq!(origin.requests.lock().unwrap().len(), 2);
+    gate.store(12, Ordering::Release);
+}
+
+#[test]
+fn far_seek_ranges_are_shared_and_do_not_block_or_restart_the_full_download() {
+    let gate = Arc::new(AtomicUsize::new(1));
+    let range_gate = Arc::new(AtomicUsize::new(0));
+    let origin = Origin::with_gates(
+        12 * CHUNK as usize,
+        Some(gate.clone()),
+        Some(range_gate.clone()),
+    );
+    let transfer = Arc::<Transfer>::default();
+    let file = prepare(origin.url.clone(), transfer.clone()).unwrap();
+    file.start();
+    until(|| origin.requests.lock().unwrap().len() == 2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let endpoint = file.source().to_owned();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                agent()
+                    .get(&endpoint)
+                    .set("Range", &format!("bytes={}-{}", 9 * CHUNK, 9 * CHUNK + 31))
+                    .call()
+                    .unwrap()
+                    .into_reader()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                tx.send(bytes).unwrap();
+            })
+        })
+        .collect();
+    until(|| origin.requests.lock().unwrap().len() == 3);
+    // The range response is blocked at the origin. The existing full stream
+    // must still deliver its next chunk without waiting for the range's lock.
+    gate.store(2, Ordering::Release);
+    until(|| file.progressive.has(1));
+    assert!(!file.progressive.has(9));
+    assert_eq!(transfer.bytes.load(Ordering::Relaxed), 2 * CHUNK);
+    assert!(!transfer.complete.load(Ordering::Acquire));
+    range_gate.store(12, Ordering::Release);
+    for _ in 0..2 {
+        let bytes = rx.recv_timeout(Duration::from_secs(8)).unwrap();
+        assert_eq!(
+            bytes,
+            (9 * CHUNK..9 * CHUNK + 32)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<_>>()
+        );
+    }
+    for reader in readers {
+        reader.join().unwrap();
+    }
+    assert_eq!(transfer.bytes.load(Ordering::Relaxed), 3 * CHUNK);
+    assert_eq!(
+        origin.requests.lock().unwrap().len(),
+        3,
+        "both readers share one range request"
+    );
+    file.start(); // Repeated Play/seek must retain the original full connection.
+    gate.store(12, Ordering::Release);
+    until(|| transfer.complete.load(Ordering::Acquire));
+    assert_eq!(transfer.bytes.load(Ordering::Relaxed), 12 * CHUNK);
+    assert_eq!(
+        *origin.requests.lock().unwrap(),
+        vec![
+            Some(format!("bytes=0-{}", CHUNK - 1)),
+            None,
+            Some(format!("bytes={}-{}", 9 * CHUNK, 10 * CHUNK - 1)),
+        ]
+    );
+    let bytes = std::fs::read(&file.path).unwrap();
+    assert!(bytes.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
 }

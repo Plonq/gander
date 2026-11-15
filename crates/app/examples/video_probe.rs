@@ -24,6 +24,10 @@ struct Probe {
     cache: Option<http::video::VideoFile>,
     transfer: std::sync::Arc<http::video::Transfer>,
     preload: bool,
+    verify_seeks: bool,
+    verify_buffering: bool,
+    seek_target: f64,
+    frame_before_seek: Option<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
 }
 impl Probe {
     fn poll(&mut self, cx: &mut Context<Self>) {
@@ -79,10 +83,17 @@ impl Probe {
                     (self.player.position() - self.paused_at).abs() < 0.1,
                     "pause drift"
                 );
-                self.player.seek(3.);
-                self.stage = 2;
+                if self.verify_buffering {
+                    self.seek_target = self.player.duration() * 0.8;
+                    self.frame_before_seek = self.player.frame.clone();
+                }
+                self.player.seek(self.seek_target);
+                self.stage = if self.verify_buffering { 20 } else { 2 };
             } else if elapsed > 3. && self.stage == 2 {
-                assert!((self.player.position() - 3.).abs() < 0.2, "seek failed");
+                assert!(
+                    (self.player.position() - self.seek_target).abs() < 0.2,
+                    "seek failed"
+                );
                 self.player.set_muted(true);
                 assert!(self.player.muted());
                 self.player.set_muted(false);
@@ -95,9 +106,9 @@ impl Probe {
             } else if elapsed > 4. && self.stage == 3 {
                 // A network seek may need an uncached range; allow buffering
                 // rather than imposing the local-file probe's one-second limit.
-                if self.player.position() > 3.5 {
+                if self.player.position() > self.seek_target + 0.5 {
                     self.stage = 4;
-                } else if elapsed > 12. {
+                } else if elapsed > if self.verify_buffering { 50. } else { 12. } {
                     eprintln!(
                         "Cache bytes={}, total={}, error={:?}",
                         self.transfer
@@ -111,10 +122,108 @@ impl Probe {
                     panic!("resume failed");
                 }
             }
+            if self.verify_buffering {
+                if self.stage == 20 && elapsed > 3. {
+                    assert!(!self.player.playing());
+                    if self.player.seeking() {
+                        assert!(
+                            self.player.frame == self.frame_before_seek,
+                            "pending seek changed picture"
+                        );
+                    }
+                    self.player.seek(0.5);
+                    self.stage = 21;
+                } else if self.stage == 21 && elapsed > 4. {
+                    assert!(!self.player.seeking(), "could not seek back to cached data");
+                    assert!(!self.player.playing());
+                    assert!((self.player.position() - 0.5).abs() < 0.05);
+                    self.frame_before_seek = self.player.frame.clone();
+                    self.player.seek(self.seek_target);
+                    self.stage = 22;
+                } else if self.stage == 22 {
+                    assert!(
+                        !self.player.playing(),
+                        "buffering seek changed pause intent"
+                    );
+                    if !self.player.seeking() {
+                        assert!(
+                            self.player.frame != self.frame_before_seek,
+                            "downloaded paused frame did not update"
+                        );
+                        self.player.play();
+                        self.stage = 3;
+                    }
+                }
+                if self.stage == 4 {
+                    eprintln!("Verified uncached seek, seek back to cached data, paused frame recovery and resume");
+                    cx.quit();
+                    return;
+                }
+            }
+            if self.verify_seeks {
+                if self.stage == 4 && elapsed > 5. {
+                    self.stage = 5;
+                }
+                if self.stage == 5 {
+                    assert!(self.player.playing(), "playing seek lost playback intent");
+                    self.player.seek(0.5 + (elapsed * 37.).fract() as f64 * 2.);
+                    if elapsed > 6. {
+                        self.player.seek(2.);
+                        self.stage = 6;
+                    }
+                } else if self.stage == 6 && elapsed > 7. {
+                    assert!(!self.player.seeking(), "playing seeks did not finish");
+                    assert!(self.player.position() > 2.2, "playing seeks did not resume");
+                    self.player.pause();
+                    self.frame_before_seek = self.player.frame.clone();
+                    self.stage = 7;
+                } else if self.stage == 7 {
+                    assert!(!self.player.playing(), "paused seek started playback");
+                    self.player.seek(0.5 + (elapsed * 37.).fract() as f64 * 2.);
+                    if elapsed > 8. {
+                        self.player.seek(1.);
+                        self.stage = 8;
+                    }
+                } else if self.stage == 8 && elapsed > 9. {
+                    assert!(!self.player.seeking(), "paused seeks did not finish");
+                    assert!((self.player.position() - 1.).abs() < 0.05);
+                    assert!(
+                        self.player.frame != self.frame_before_seek,
+                        "paused seek did not update the frame"
+                    );
+                    self.player.play();
+                    self.player.seek(2.);
+                    self.stage = 9;
+                } else if self.stage == 9 && elapsed > 9.05 {
+                    // Pause after a playing seek was issued: completion must
+                    // respect the most recent user intent.
+                    self.player.pause();
+                    self.stage = 10;
+                } else if self.stage == 10 && elapsed > 10. {
+                    assert!(!self.player.playing());
+                    self.paused_at = self.player.position();
+                    self.stage = 11;
+                } else if self.stage == 11 && elapsed > 11. {
+                    assert!((self.player.position() - self.paused_at).abs() < 0.05);
+                    self.player.seek(3.);
+                    self.player.play();
+                    self.stage = 12;
+                } else if self.stage == 12 && elapsed > 12. {
+                    assert!(self.player.playing());
+                    assert!(!self.player.seeking());
+                    assert!(self.player.position() > 3.2);
+                    self.stage = 13;
+                    eprintln!("Verified rapid playing/paused seeks, paused frame updates and playback intent changes");
+                }
+            }
         }
-        if self.start.elapsed() > Duration::from_secs(15) {
+        if self.start.elapsed() > Duration::from_secs(if self.verify_buffering { 60 } else { 15 }) {
             if self.verify {
-                assert_eq!(self.stage, 4, "verification did not finish");
+                assert_eq!(
+                    self.stage,
+                    if self.verify_seeks { 13 } else { 4 },
+                    "verification did not finish"
+                );
             }
             eprintln!(
                 "position {:.2}, frame {}",
@@ -238,12 +347,18 @@ fn main() {
                     start: Instant::now(),
                     reported: false,
                     focus,
-                    verify: std::env::args().any(|arg| arg == "--verify"),
+                    verify: std::env::args().any(|arg| {
+                        arg == "--verify" || arg == "--verify-seeks" || arg == "--verify-buffering"
+                    }),
                     stage: 0,
                     paused_at: 0.,
                     cache,
                     transfer,
                     preload,
+                    verify_seeks: std::env::args().any(|arg| arg == "--verify-seeks"),
+                    verify_buffering: std::env::args().any(|arg| arg == "--verify-buffering"),
+                    seek_target: 3.,
+                    frame_before_seek: None,
                 }
             })
         })

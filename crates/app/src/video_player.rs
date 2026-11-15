@@ -12,7 +12,11 @@ use objc2_core_video::{
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, CVPixelBuffer, CVPixelBufferGetPixelFormatType,
 };
 use objc2_foundation::{ns_string, NSDictionary, NSMutableCopying, NSNumber, NSString, NSURL};
-use std::{path::Path, ptr};
+use std::{
+    path::Path,
+    ptr,
+    time::{Duration, Instant},
+};
 
 pub(crate) struct VideoPlayer {
     player: Retained<AVPlayer>,
@@ -22,7 +26,16 @@ pub(crate) struct VideoPlayer {
     pub frame: Option<CFRetained<CVPixelBuffer>>,
     composition:
         Option<futures::channel::oneshot::Receiver<Result<Retained<AVVideoComposition>, String>>>,
+    // User intent is independent of AVPlayer's rate during seeks/buffering.
     play_requested: bool,
+    seek_target: Option<f64>,
+    seek_in_flight: Option<Seek>,
+}
+
+struct Seek {
+    target: f64,
+    started: Instant,
+    completion: futures::channel::oneshot::Receiver<bool>,
 }
 
 impl VideoPlayer {
@@ -52,6 +65,7 @@ impl VideoPlayer {
         unsafe {
             let item = AVPlayerItem::playerItemWithURL(url, mtm);
             item.setPreferredForwardBufferDuration(1.0);
+            item.setSeekingWaitsForVideoCompositionRendering(true);
             let surface_properties = NSDictionary::<NSString, objc2::runtime::AnyObject>::new();
             let attributes = NSDictionary::from_slices(
                 &[
@@ -90,7 +104,9 @@ impl VideoPlayer {
                 &callback,
             );
             let player = AVPlayer::playerWithPlayerItem(Some(&item), mtm);
-            player.setAutomaticallyWaitsToMinimizeStalling(false);
+            // With this disabled a buffer underrun changes rate to zero and
+            // leaves playback paused indefinitely.
+            player.setAutomaticallyWaitsToMinimizeStalling(true);
             Ok(Self {
                 player,
                 item,
@@ -99,6 +115,8 @@ impl VideoPlayer {
                 frame: None,
                 composition: Some(rx),
                 play_requested: false,
+                seek_target: None,
+                seek_in_flight: None,
             })
         }
     }
@@ -120,12 +138,10 @@ impl VideoPlayer {
                     self.item.addOutput(&self.output);
                     self.output_attached = true;
                     self.composition = None;
-                    self.seek(0.);
+                    if self.seek_target.is_none() {
+                        self.seek(0.);
+                    }
                 }
-            }
-            if self.play_requested && self.ready() {
-                self.player.play();
-                self.play_requested = false;
             }
             ensure!(
                 self.player.status() != AVPlayerStatus::Failed,
@@ -142,6 +158,7 @@ impl VideoPlayer {
             if !self.ready() {
                 return Ok(());
             }
+            self.finish_seek()?;
             let time = self.player.currentTime();
             if self.output.hasNewPixelBufferForItemTime(time) {
                 if let Some(frame) = self
@@ -169,8 +186,72 @@ impl VideoPlayer {
                     self.frame = Some(frame.into());
                 }
             }
+            // Read the completed seek's frame before chasing the next target.
+            self.start_seek();
+            if !self.seeking() && self.play_requested && self.player.rate() == 0. {
+                if self.duration() > 0. && self.position() >= self.duration() - 0.001 {
+                    self.play_requested = false;
+                } else {
+                    self.player.play();
+                }
+            }
         }
         Ok(())
+    }
+
+    fn finish_seek(&mut self) -> anyhow::Result<()> {
+        if let Some(seek) = &mut self.seek_in_flight {
+            if let Some(finished) = seek.completion.try_recv()? {
+                if finished && self.seek_target == Some(seek.target) {
+                    self.seek_target = None;
+                }
+                self.seek_in_flight = None;
+            } else if self.seek_target != Some(seek.target)
+                && seek.started.elapsed() >= Duration::from_millis(100)
+            {
+                // A seek waiting on undownloaded bytes must not prevent a new
+                // seek back into cached data. Normal scrubbing lets each seek
+                // finish rather than repeatedly cancelling the decoder's work.
+                unsafe { self.item.cancelPendingSeeks() };
+                self.seek_in_flight = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn start_seek(&mut self) {
+        if self.seek_in_flight.is_some() {
+            return;
+        }
+        let Some(target) = self.seek_target else {
+            return;
+        };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let callback = block2::RcBlock::new(move |finished: objc2::runtime::Bool| {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(finished.as_bool());
+            }
+        });
+        unsafe {
+            self.player.pause();
+            self.player
+                .seekToTime_toleranceBefore_toleranceAfter_completionHandler(
+                    CMTime::with_seconds(target, 600),
+                    objc2_core_media::kCMTimeZero,
+                    objc2_core_media::kCMTimeZero,
+                    &callback,
+                );
+        }
+        self.seek_in_flight = Some(Seek {
+            target,
+            started: Instant::now(),
+            completion: rx,
+        });
+    }
+
+    pub fn seeking(&self) -> bool {
+        self.seek_target.is_some() || self.seek_in_flight.is_some()
     }
 
     pub fn ready(&self) -> bool {
@@ -178,10 +259,11 @@ impl VideoPlayer {
             && unsafe { self.item.status() == AVPlayerItemStatus::ReadyToPlay }
     }
     pub fn playing(&self) -> bool {
-        unsafe { self.player.rate() != 0. }
+        self.play_requested
     }
     pub fn position(&self) -> f64 {
-        seconds(unsafe { self.player.currentTime().seconds() })
+        self.seek_target
+            .unwrap_or_else(|| seconds(unsafe { self.player.currentTime().seconds() }))
     }
     pub fn duration(&self) -> f64 {
         seconds(unsafe { self.item.duration().seconds() })
@@ -191,23 +273,23 @@ impl VideoPlayer {
         unsafe { self.player.pause() }
     }
     pub fn play(&mut self) {
+        self.play_requested = true;
         if !self.ready() {
-            self.play_requested = true;
             return;
         }
-        if self.duration() > 0. && self.position() >= self.duration() - 0.05 {
+        if !self.seeking() && self.duration() > 0. && self.position() >= self.duration() - 0.05 {
             self.seek(0.);
         }
-        unsafe { self.player.play() }
+        if !self.seeking() {
+            unsafe { self.player.play() }
+        }
     }
-    pub fn seek(&self, seconds: f64) {
-        let seconds = seconds.clamp(0., self.duration());
-        unsafe {
-            self.player.seekToTime_toleranceBefore_toleranceAfter(
-                CMTime::with_seconds(seconds, 600),
-                objc2_core_media::kCMTimeZero,
-                objc2_core_media::kCMTimeZero,
-            );
+    pub fn seek(&mut self, seconds: f64) {
+        if seconds.is_finite() {
+            self.seek_target = Some(seconds.clamp(0., self.duration()));
+            if self.ready() {
+                self.start_seek();
+            }
         }
     }
     pub fn muted(&self) -> bool {

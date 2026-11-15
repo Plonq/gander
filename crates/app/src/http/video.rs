@@ -1,5 +1,5 @@
 //! Video-only transport: metadata discovery, bounded preview ranges and eager
-//! full downloads on Play. Image request budgets and buffering stay intact.
+//! full downloads on Play or seek. Image request budgets and buffering stay intact.
 use super::{authenticate, http, needs_github_token, TokenProvider, UreqHttpClient};
 use anyhow::ensure;
 #[path = "video/progressive.rs"]
@@ -147,7 +147,7 @@ fn probe(url: &str, token: &TokenProvider) -> anyhow::Result<bool> {
 }
 
 /// Prepare a progressive source after its first bounded range. This does not
-/// wait for the full file; `VideoFile::start` begins the eager download on Play.
+/// wait for the full file; `VideoFile::start` begins the eager download on Play or seek.
 pub(crate) fn download(
     url: String,
     transfer: Arc<Transfer>,
