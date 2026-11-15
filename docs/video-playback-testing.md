@@ -19,8 +19,10 @@ Separate real-socket HTTP tests cover one-byte ranged GET metadata requests,
 GET-signed redirects that reject HEAD, redirect authentication, streaming bounds,
 progress, cancellation and private cache permissions. Progressive-cache tests
 cover first/tail range reuse, the preload budget, invalid ranges/paths, truncated
-responses, and eager completion without a decoder reader. They do not require
-GitHub credentials or download public media.
+responses, eager completion without a decoder reader, waiting for nearby seeks
+without duplicate requests, sharing far-seek ranges while the full download
+continues, and releasing abandoned unbuffered readers.
+They do not require GitHub credentials or download public media.
 
 ## Native decoding probe
 
@@ -30,6 +32,7 @@ the production authenticated range cache:
 
 ```sh
 cargo run -p gander --example video_probe --locked -- /absolute/clip.mp4 --verify
+cargo run -p gander --example video_probe --locked -- /absolute/clip.mp4 --verify-seeks
 cargo run -p gander --example video_probe --locked -- /absolute/portrait.mov --verify
 cargo run -p gander --example video_probe --locked -- /absolute/clip.webm
 cargo run -p gander --example video_probe --locked -- 'https://github.com/user-attachments/assets/ID' --preload --verify
@@ -39,9 +42,19 @@ Running this command is an explicit playback request. The diagnostic plays the
 file, prints the first decoded frame's dimensions and duration, and exits after
 15 seconds (or earlier for an unsupported format). `--verify` pauses, checks for
 position drift, seeks to three seconds, checks mute/volume state, and resumes;
-use a fixture at least five seconds long. Space, Left/Right, M and Esc are also
-available. With `--preload`, the diagnostic first asserts paused preview decoding,
-reports cached/total bytes, then explicitly starts playback and the eager download.
+use a fixture at least five seconds long. `--verify-seeks` additionally exercises
+rapid seeks over successive frames while playing and paused, checks paused frame
+updates, and changes play/pause intent around seeks; use a clip at least ten
+seconds long. Space, Left/Right, M and Esc are also available. With `--preload`,
+the diagnostic first asserts paused preview decoding, reports cached/total bytes, then explicitly starts playback and the eager download.
+For a throttled source larger than the 8 MiB preload budget, combine `--preload`
+with `--verify-buffering`. This seeks to 80% while paused, checks that any wait
+holds the picture, seeks back into cached data, then checks the far seek updates
+the paused frame and playback resumes. It allows up to 60 seconds. Origin logs
+should show one full GET continuing alongside bounded ranges for far seeks;
+nearby seeks wait for the full stream and repeated reads reuse cached ranges.
+The full stream may later receive bytes already fetched by a range: it remains
+open and consumes those overlapping bytes without writing or counting them again.
 The probe is not the application controls UI.
 
 For reproducible public fixtures, Samplelib provides
@@ -66,11 +79,16 @@ metadata; AVFoundation can reject an otherwise valid local MP4 with no suffix.
 Use a PR containing authorized test attachments; do not post or alter the PR.
 
 - Check MP4 and portrait MOV playback, sound, correct orientation/aspect ratio,
-  seeking, end/replay, mute and volume. Repeat with the app already fullscreen.
+  seeking, end/replay, mute and volume. Drag rapidly while playing and paused:
+  playing must resume, paused must stay paused and display the selected frame.
+  Seek beyond downloaded data: the picture should hold until data arrives, the
+  existing download must continue alongside any far-seek range requests, and
+  seeking back into cached data must work.
+  Repeat with the app already fullscreen.
 - Check private extensionless GitHub attachments while signed in through `gh`.
   Classification sends `Range: bytes=0-0` and inspects headers without reading
   the body. Recognized videos then preload a paused first frame using bounded
-  ranges (up to 8 MiB). The eager full download starts on Play, continues while
+  ranges (up to 8 MiB). The eager full download starts on Play or an explicit seek, continues while
   paused, and serves subsequent playback from disk. Verify early playback with a
   throttled connection and a file larger than the preload budget. GitHub's signed
   S3 redirects can reject HEAD with 403, so discovery must use GET.

@@ -1,6 +1,6 @@
 //! A private loopback range server over a bounded sparse file. AVFoundation sees
 //! neither GitHub credentials nor signed CDN URLs. Previews fetch bounded ranges;
-//! Play starts one eager full download, independently of decoder buffering.
+//! Play or seek starts one eager full download, independently of decoder buffering.
 use super::*;
 use anyhow::Context as _;
 use std::{
@@ -183,6 +183,11 @@ impl Cache {
     fn store(&self, chunk: u64, bytes: &[u8]) -> anyhow::Result<()> {
         self.transfer.check()?;
         let mut file = self.file.lock().unwrap();
+        // A range and the full stream may deliver the same chunk. Keep the
+        // cached copy and count it once rather than rewriting it.
+        if self.has(chunk) {
+            return Ok(());
+        }
         file.seek(SeekFrom::Start(chunk * CHUNK))?;
         file.write_all(bytes)?;
         if self.chunks.lock().unwrap().insert(chunk) {
@@ -204,17 +209,21 @@ impl Cache {
         if !self.transfer.started.load(Ordering::Acquire) {
             return chunks.len() < PRELOAD_CHUNKS;
         }
-        // The eager connection is already delivering near-future playback data.
-        // Don't stall it (or the decoder) behind a duplicate range round-trip.
-        // Far-away seeks still get a priority range instead of waiting for the
-        // sequential download to reach them.
+        // Let the full download supply nearby data. Far-ahead seeks may fetch
+        // one bounded range on a separate connection; they never restart or
+        // acquire a network lock needed by the full download.
         let next = (0..self.total.div_ceil(CHUNK))
             .find(|i| !chunks.contains(i))
             .unwrap_or(self.total.div_ceil(CHUNK));
         chunk > next + 2
     }
+    #[cfg(test)]
     fn ensure(&self, chunk: u64) -> anyhow::Result<()> {
+        self.ensure_while(chunk, || true)
+    }
+    fn ensure_while(&self, chunk: u64, connected: impl Fn() -> bool) -> anyhow::Result<()> {
         loop {
+            ensure!(connected(), "Video reader disconnected");
             self.transfer.check()?;
             ensure!(
                 self.transfer.error.lock().unwrap().is_none(),
@@ -255,7 +264,7 @@ impl Cache {
             let _wait = self
                 .transfer
                 .changed
-                .wait_timeout(event, Duration::from_secs(1))
+                .wait_timeout(event, Duration::from_millis(25))
                 .unwrap();
         }
     }
@@ -298,6 +307,22 @@ impl Cache {
             }
         });
     }
+}
+// A cancelled AVFoundation seek can abandon a read while it waits for the
+// eager download. Release that client slot without waiting for the bytes.
+fn connected(socket: &TcpStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut byte = 0u8;
+    let result = unsafe {
+        libc::recv(
+            socket.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    result > 0
+        || (result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock)
 }
 fn serve(mut socket: TcpStream, weak: Weak<Cache>) {
     let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
@@ -351,7 +376,7 @@ fn serve(mut socket: TcpStream, weak: Weak<Cache>) {
         let mut offset = start;
         while offset <= end {
             let chunk = offset / CHUNK;
-            cache.ensure(chunk)?;
+            cache.ensure_while(chunk, || connected(&socket))?;
             let n = (end - offset + 1).min(CHUNK - offset % CHUNK) as usize;
             let mut bytes = vec![0; n];
             {

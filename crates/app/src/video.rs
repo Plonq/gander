@@ -464,6 +464,11 @@ impl VideoSession {
                             player.pause();
                         }
                     }
+                    // Slow downloads (including seeks ahead of the cache) are
+                    // waiting for data, not decoder preparation failures.
+                    if !s.transfer.complete.load(Ordering::Acquire) {
+                        s.ready_since = Instant::now();
+                    }
                     let old_frame = s.player.as_ref().and_then(|p| p.frame.clone());
                     if let Some(player) = &mut s.player {
                         if let Err(error) = player.tick() {
@@ -494,7 +499,10 @@ impl VideoSession {
                     }
                     previous = Some(state);
                     interval = Duration::from_millis(
-                        if s.player.as_ref().is_some_and(|p| p.playing() || !p.ready()) {
+                        if s.player
+                            .as_ref()
+                            .is_some_and(|p| p.playing() || p.seeking() || !p.ready())
+                        {
                             16
                         } else {
                             250
@@ -537,6 +545,17 @@ impl VideoSession {
         }
         self.resume(cx);
     }
+    fn seek(&mut self, position: f64) {
+        // Seeking a never-played preview is also an explicit request for data,
+        // but must leave playback paused. Always download from the beginning.
+        if let Some(file) = &self.file {
+            file.start();
+        }
+        if let Some(player) = &mut self.player {
+            player.seek(position);
+        }
+    }
+
     pub fn is_playing(&self) -> bool {
         self.play_when_ready
             && (self
@@ -577,15 +596,21 @@ impl VideoSession {
             }
             return;
         }
-        if let Some(player) = &mut self.player {
-            match key {
-                "left" => player.seek(player.position() - 5.),
-                "right" => player.seek(player.position() + 5.),
-                "m" => player.set_muted(!player.muted()),
-                _ => {}
+        match key {
+            "left" | "right" => {
+                if let Some(player) = &self.player {
+                    let delta = if key == "left" { -5. } else { 5. };
+                    self.seek(player.position() + delta);
+                }
             }
-            cx.notify();
+            "m" => {
+                if let Some(player) = &self.player {
+                    player.set_muted(!player.muted());
+                }
+            }
+            _ => {}
         }
+        cx.notify();
     }
 }
 impl Drop for VideoSession {

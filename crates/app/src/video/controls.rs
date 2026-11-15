@@ -136,12 +136,18 @@ impl VideoSession {
         drag.value = (f32::from(position.x - drag.bounds.left())
             / f32::from(drag.bounds.size.width).max(1.))
         .clamp(0., 1.);
-        if let Some(player) = &self.player {
-            match drag.kind {
-                SliderKind::Seek => player.seek(player.duration() * f64::from(drag.value)),
-                SliderKind::Volume => {
-                    player.set_volume(drag.value);
-                    player.set_muted(drag.value == 0.);
+        let kind = drag.kind;
+        let value = drag.value;
+        match kind {
+            SliderKind::Seek => {
+                if let Some(player) = &self.player {
+                    self.seek(player.duration() * f64::from(value));
+                }
+            }
+            SliderKind::Volume => {
+                if let Some(player) = &self.player {
+                    player.set_volume(value);
+                    player.set_muted(value == 0.);
                 }
             }
         }
