@@ -66,7 +66,11 @@ pub(crate) fn supports_code(file: &FileDiff) -> bool {
 
 impl ItemData {
     pub(crate) fn shows_file_media(&self) -> bool {
-        self.diff.files.get(self.file_ix).is_some_and(|file| {
+        self.shows_file_media_for(self.file_ix)
+    }
+
+    pub(crate) fn shows_file_media_for(&self, file_ix: usize) -> bool {
+        self.diff.files.get(file_ix).is_some_and(|file| {
             file_kind(file).is_some()
                 && !(supports_code(file) && self.svg_code.contains(file.display_path()))
         })

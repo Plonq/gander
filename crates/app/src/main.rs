@@ -9089,7 +9089,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_tree_comment_badges_survive_filtering_and_hidden_comments(
+    fn file_tree_comment_badges_follow_filtering_and_comment_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
         let comment = |id, line, parent| {
@@ -9108,6 +9108,7 @@ mod tests {
         // after an element disappears, so absence checks need a clean frame.
         for (query, has_comments, comments_visible) in [
             ("", true, true),
+            ("a.rs", true, true),
             ("", true, false),
             ("a.rs", true, false),
             ("b.rs", true, false),
@@ -9144,7 +9145,7 @@ mod tests {
             });
             assert_eq!(
                 vcx.debug_bounds("file-comments-0").is_some(),
-                has_comments && query != "b.rs"
+                has_comments && comments_visible && query != "b.rs"
             );
             assert!(vcx.debug_bounds("file-comments-1").is_none());
         }
@@ -17281,6 +17282,95 @@ mod tests {
     }
 
     #[gpui::test]
+    fn resolved_inline_thread_headers_toggle_without_affecting_other_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use github::GitHubClient;
+        for mode in [ViewMode::Unified, ViewMode::Split] {
+            for side in ["LEFT", "RIGHT"] {
+                let comments = vec![
+                    rc(11, "a.rs", Some(side), Some(1), "Root", "alice", "a", None),
+                    rc(
+                        12,
+                        "a.rs",
+                        Some(side),
+                        Some(1),
+                        "Reply",
+                        "bob",
+                        "b",
+                        Some(11),
+                    ),
+                ];
+                let fake = FakePr::with_threads(comments.clone());
+                fake.resolutions.lock().unwrap().insert("11".into(), true);
+                fake.comment_permissions
+                    .lock()
+                    .unwrap()
+                    .insert(11, permitted_comment("C11", true, true));
+                let (window, app) = queue_window(cx, fake.clone());
+                let mut item = loop_pr_item(comments);
+                let ItemState::Ready(data) = &mut item.state else {
+                    unreachable!()
+                };
+                data.mode = mode;
+                data.diff = sample_diff();
+                data.discussion = Some(fake.pr_discussion(&loop_loc()).unwrap());
+                data.set_rows(data.row_build());
+                install_item(&app, item, cx);
+                let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+                vcx.simulate_resize(size(px(1400.), px(1800.)));
+                let expanded = |cx: &gpui::TestAppContext| {
+                    cx.update(|cx| {
+                        app.read(cx)
+                            .active_data()
+                            .unwrap()
+                            .expanded_threads
+                            .contains("11")
+                    })
+                };
+
+                click_commenting(&mut vcx, "inline-avatar-11");
+                assert!(expanded(cx), "the avatar expands the resolved thread");
+                click_commenting(&mut vcx, "inline-avatar-12");
+                assert!(expanded(cx), "reply headers must not toggle the thread");
+                click_commenting(&mut vcx, "inline-comment-time-11");
+                assert!(!expanded(cx), "the timestamp collapses the thread");
+                click_commenting(&mut vcx, "inline-thread-header-11");
+                assert!(expanded(cx), "empty header space expands the thread");
+                click_commenting(&mut vcx, "inline-thread-header-11");
+                assert!(!expanded(cx), "empty header space collapses the thread");
+                assert!(
+                    vcx.debug_bounds("thread-expand-0-11").is_none(),
+                    "the separate Resolved button is removed"
+                );
+
+                click_commenting(&mut vcx, "comment-edit-review-comment-C11");
+                cx.update(|cx| assert!(app.read(cx).composer().is_some()));
+                assert!(
+                    expanded(cx),
+                    "editing keeps the thread expanded for its editor"
+                );
+                click_commenting(&mut vcx, "inline-thread-header-11");
+                assert!(expanded(cx), "the header is disabled while composing");
+                vcx.update(|window, cx| {
+                    app.update(cx, |this, cx| this.close_composer(window, cx));
+                });
+                click_commenting(&mut vcx, "thread-resolve-0-11");
+                assert!(!expanded(cx), "Unresolve must not toggle the header");
+                click_commenting(&mut vcx, "inline-thread-header-11");
+                assert!(!expanded(cx), "unresolved headers are not collapsible");
+                assert_eq!(
+                    fake.posts(),
+                    vec![Post::Resolve {
+                        thread_id: "11".into(),
+                        resolved: false,
+                    }]
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
     fn thread_resolution_controls_sync_both_views_and_show_failures(cx: &mut gpui::TestAppContext) {
         use github::GitHubClient;
         use std::sync::atomic::Ordering::SeqCst;
@@ -17318,7 +17408,7 @@ mod tests {
                 "resolving collapses the thread"
             );
         });
-        click_commenting(&mut vcx, "thread-expand-0-11");
+        click_commenting(&mut vcx, "inline-thread-header-11");
         cx.update(|cx| {
             let data = app.read(cx).active_data().unwrap();
             assert!(data.expanded_threads.contains("11"));
@@ -17330,7 +17420,7 @@ mod tests {
                 }
             )));
         });
-        click_commenting(&mut vcx, "thread-expand-0-11");
+        click_commenting(&mut vcx, "inline-thread-header-11");
         cx.update(|cx| {
             let data = app.read(cx).active_data().unwrap();
             assert!(!data.expanded_threads.contains("11"));
