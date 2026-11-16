@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use crate::{theme, threads::CommentIndex, ItemData, ReviewApp};
-use diff_core::{FileDiff, FileStatus};
+use crate::{theme, threads::CommentSide, ItemData, ReviewApp};
+use diff_core::{DiffRow, FileDiff, FileStatus};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use gpui::component::{checkbox::Checkbox, Disableable as _, Icon, Sizable as _};
 use gpui::component::{
@@ -320,12 +320,56 @@ impl FileTree {
     }
 }
 
-/// Count anchored comments, not threads, including replies and drafts.
-/// Outdated threads have no rows in the current diff, so exclude them.
-fn file_comment_count(file: &FileDiff, comments: Option<&CommentIndex>) -> usize {
-    comments
-        .and_then(|index| index.counts.get(file.display_path()))
-        .map_or(0, |(anchored, _)| *anchored)
+/// Count visible threads, excluding replies regardless of disclosure state.
+/// Hidden and unrenderable threads contribute none.
+fn file_thread_count(data: &ItemData, file_ix: usize) -> usize {
+    if !data.comments_visible {
+        return 0;
+    }
+    let file = &data.diff.files[file_ix];
+    let Some(anchors) = data
+        .comments
+        .as_ref()
+        .and_then(|index| index.threads.get(file.display_path()))
+    else {
+        return 0;
+    };
+    let upgrade = data.upgrades.get(&file_ix);
+    if data.shows_file_media_for(file_ix)
+        || (crate::presentation::auto_collapse(crate::presentation::file_lines(file, upgrade))
+            && !data.expanded_regions.contains(&(file_ix, 0)))
+    {
+        return 0;
+    }
+    anchors
+        .iter()
+        .filter(|((side, line), _)| {
+            // Whitespace filtering realigns rows but preserves source line
+            // numbers, and context folding leaves comment anchors visible.
+            file.hunks.iter().flat_map(|hunk| &hunk.rows).any(|row| {
+                let no = match (side, row) {
+                    (
+                        CommentSide::Left,
+                        DiffRow::Context { old_no, .. } | DiffRow::Removed { old_no, .. },
+                    ) => Some(*old_no),
+                    (
+                        CommentSide::Right,
+                        DiffRow::Context { new_no, .. } | DiffRow::Added { new_no, .. },
+                    ) => Some(*new_no),
+                    _ => None,
+                };
+                no.is_some_and(|no| u64::from(no) == *line)
+            }) || upgrade.is_some_and(|upgrade| {
+                (0..=file.hunks.len()).any(|gap| {
+                    let (old, new, count) =
+                        crate::rows::gap_span(&file.hunks, gap, upgrade.new_lines.len() as u32);
+                    let start = u64::from(if *side == CommentSide::Left { old } else { new });
+                    *line >= start && *line < start + u64::from(count)
+                })
+            })
+        })
+        .flat_map(|(_, threads)| threads)
+        .count()
 }
 
 /// Kit paints mouse selection; `current` is a separate narrow viewport marker.
@@ -341,7 +385,7 @@ pub(crate) fn render_tree_row(
     cx: &gpui::App,
 ) -> ListItem {
     let comments = |file_ix: usize| {
-        let count = file_comment_count(&data.diff.files[file_ix], data.comments.as_ref());
+        let count = file_thread_count(data, file_ix);
         (count > 0).then(|| {
             div()
                 .debug_selector(move || format!("file-comments-{file_ix}"))
@@ -506,37 +550,70 @@ pub(crate) fn render_tree_row(
 mod tests {
     use super::*;
 
-    #[test]
-    fn file_comment_counts_exclude_outdated_and_use_display_path() {
-        let mut file = crate::test_util::sample_diff().files.remove(0);
-        let mut index = CommentIndex::default();
-        index.counts.insert("a.rs".into(), (2, 3));
-        index.counts.insert("renamed.rs".into(), (4, 0));
-        assert_eq!(file_comment_count(&file, Some(&index)), 2);
-        assert_eq!(file_comment_count(&file, None), 0);
+    use crate::rows::{build_rows, Row, RowOptions, RowsView, ViewMode};
+    use crate::threads::{group_comments, CommentIndex, CommentTime, ReviewComment};
 
-        file.status = FileStatus::Renamed;
-        file.new_path = Some("renamed.rs".into());
-        assert_eq!(file_comment_count(&file, Some(&index)), 4);
+    fn comment_data(comments: Option<CommentIndex>) -> ItemData {
+        let diff = crate::test_util::sample_diff();
+        let built = build_rows(RowsView {
+            diff: &diff,
+            upgrades: &Default::default(),
+            comments: comments.as_ref(),
+            options: RowOptions {
+                mode: ViewMode::Unified,
+                file_ix: 0,
+                comments_visible: true,
+                comment_wrap: 80,
+            },
+        });
+        ItemData::new(None, diff, ViewMode::Unified, 0, built, comments, None)
+    }
 
-        file.status = FileStatus::Deleted;
-        file.new_path = None;
-        assert_eq!(file_comment_count(&file, Some(&index)), 2);
-
-        index.counts.insert("a.rs".into(), (0, 3));
-        assert_eq!(file_comment_count(&file, Some(&index)), 0);
-        index.counts.clear();
-        assert_eq!(file_comment_count(&file, Some(&index)), 0);
+    fn assert_visible_count(data: &mut ItemData, expected: usize) {
+        // Check the badge even while a different file is open.
+        data.file_ix = 1;
+        data.set_rows(data.row_build());
+        assert_eq!(file_thread_count(data, 0), expected);
+        data.file_ix = 0;
+        data.set_rows(data.row_build());
+        assert_eq!(file_thread_count(data, 0), expected);
+        assert_eq!(
+            data.rows
+                .iter()
+                .filter(|row| matches!(row, Row::CommentHeader { top: true, .. }))
+                .count(),
+            expected,
+        );
     }
 
     #[test]
-    fn file_comment_counts_include_only_anchored_threads_and_their_replies() {
-        use crate::threads::{group_comments, CommentSide, CommentTime, ReviewComment};
+    fn file_thread_counts_use_display_path() {
+        let mut index = crate::test_util::sample_comments();
+        let mut renamed = crate::test_util::sample_comments()
+            .threads
+            .remove("a.rs")
+            .unwrap();
+        renamed.retain(|(side, _), _| *side == CommentSide::Right);
+        index.threads.insert("renamed.rs".into(), renamed);
+        let mut data = comment_data(Some(index));
+        assert_visible_count(&mut data, 2);
 
-        let file = crate::test_util::sample_diff().files.remove(0);
+        data.diff.files[0].status = FileStatus::Renamed;
+        data.diff.files[0].new_path = Some("renamed.rs".into());
+        assert_visible_count(&mut data, 1);
+
+        data.diff.files[0].status = FileStatus::Deleted;
+        data.diff.files[0].new_path = None;
+        assert_visible_count(&mut data, 2);
+        data.comments = None;
+        assert_visible_count(&mut data, 0);
+    }
+
+    #[test]
+    fn file_thread_counts_exclude_replies_and_unrenderable_threads() {
         let comment = |id: u64, line, parent: Option<u64>| ReviewComment {
             id: id.into(),
-            path: file.display_path().into(),
+            path: "a.rs".into(),
             line,
             side: CommentSide::Right,
             start_line: None,
@@ -545,24 +622,116 @@ mod tests {
             time: CommentTime::Draft,
             in_reply_to_id: parent.map(Into::into),
         };
-        // Two outdated roots with four replies.
-        let mut comments = vec![
+        let index = group_comments(vec![
             comment(1, None, None),
             comment(2, None, Some(1)),
-            comment(3, None, Some(1)),
-            comment(4, None, Some(1)),
-            comment(5, None, None),
+            comment(3, Some(2), None),
+            comment(4, None, Some(3)),
+            // Current anchors can still be outside the displayed file contents.
+            comment(5, Some(99), None),
             comment(6, None, Some(5)),
-        ];
-        let index = group_comments(comments.clone());
-        assert_eq!(index.counts[file.display_path()], (0, 6));
-        assert_eq!(file_comment_count(&file, Some(&index)), 0);
+            // A full-file upgrade can make gap anchors visible.
+            comment(7, Some(6), None),
+        ]);
+        assert_eq!(index.counts["a.rs"], (5, 2));
+        let mut data = comment_data(Some(index));
+        for mode in [ViewMode::Unified, ViewMode::Split] {
+            data.mode = mode;
+            assert_visible_count(&mut data, 1);
+            data.upgrades.insert(
+                0,
+                crate::rows::FileUpgrade {
+                    new_lines: (0..12).map(|_| "line".into()).collect(),
+                    old_spans: Vec::new(),
+                    new_spans: Vec::new(),
+                },
+            );
+            assert_visible_count(&mut data, 2);
+            data.preferences.collapse_unchanged = Some(true);
+            assert_visible_count(&mut data, 2);
+            data.upgrades.clear();
+            data.comments_visible = false;
+            assert_visible_count(&mut data, 0);
+            data.comments_visible = true;
+        }
+        data.upgrades.insert(
+            0,
+            crate::rows::FileUpgrade {
+                new_lines: vec!["line".into(); crate::presentation::AUTO_COLLAPSE_LINES],
+                old_spans: Vec::new(),
+                new_spans: Vec::new(),
+            },
+        );
+        assert_visible_count(&mut data, 0);
+        data.expanded_regions.insert((0, 0));
+        assert_visible_count(&mut data, 3);
+    }
 
-        comments.extend([comment(7, Some(2), None), comment(8, None, Some(7))]);
-        let index = group_comments(comments);
-        // Replies follow the root's anchor, even without their own line.
-        assert_eq!(index.counts[file.display_path()], (2, 6));
-        assert_eq!(file_comment_count(&file, Some(&index)), 2);
+    #[test]
+    fn file_thread_counts_are_unchanged_by_disclosure_resolution_and_editing() {
+        let remote = vec![
+            crate::test_util::rc(
+                1,
+                "a.rs",
+                Some("RIGHT"),
+                Some(2),
+                "root",
+                "alice",
+                "a",
+                None,
+            ),
+            crate::test_util::rc(
+                2,
+                "a.rs",
+                Some("RIGHT"),
+                Some(2),
+                "reply",
+                "bob",
+                "b",
+                Some(1),
+            ),
+            crate::test_util::rc(3, "a.rs", Some("LEFT"), Some(2), "open", "alice", "c", None),
+        ];
+        let mut discussion = github::PrDiscussion::from_review_comments(remote.clone());
+        discussion.threads[0].is_resolved = true;
+        let mut data = comment_data(Some(group_comments(
+            remote.into_iter().map(Into::into).collect(),
+        )));
+        data.discussion = Some(discussion);
+        for mode in [ViewMode::Unified, ViewMode::Split] {
+            data.mode = mode;
+            assert_visible_count(&mut data, 2);
+            data.expanded_threads.insert("1".into());
+            assert_visible_count(&mut data, 2);
+            data.expanded_threads.clear();
+            assert_visible_count(&mut data, 2);
+            data.editing_comments
+                .insert(2, std::rc::Rc::new(std::cell::Cell::new(px(40.))));
+            assert_visible_count(&mut data, 2);
+            data.editing_comments.clear();
+            assert_visible_count(&mut data, 2);
+            data.discussion.as_mut().unwrap().threads[0].is_resolved = false;
+            assert_visible_count(&mut data, 2);
+            data.discussion.as_mut().unwrap().threads[0].is_resolved = true;
+        }
+    }
+
+    #[test]
+    fn file_thread_counts_exclude_media_previews() {
+        let mut index = crate::test_util::sample_comments();
+        let anchors = index.threads.remove("a.rs").unwrap();
+        index.threads.insert("a.svg".into(), anchors);
+        let mut data = comment_data(Some(index));
+        data.diff.files[0].old_path = Some("a.svg".into());
+        data.diff.files[0].new_path = Some("a.svg".into());
+        assert_eq!(file_thread_count(&data, 0), 0);
+        data.svg_code.insert("a.svg".into());
+        assert_visible_count(&mut data, 2);
+        data.svg_code.clear();
+        assert_eq!(file_thread_count(&data, 0), 0);
+        data.svg_code.insert("a.svg".into());
+        data.diff.files[0].status = FileStatus::Binary;
+        assert_visible_count(&mut data, 0);
     }
 
     /// (depth, display name, Some(file_ix) for files / None for dirs).

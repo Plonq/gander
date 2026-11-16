@@ -9089,7 +9089,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_tree_comment_badges_survive_filtering_and_hidden_comments(
+    fn file_tree_comment_badges_follow_filtering_and_comment_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
         let comment = |id, line, parent| {
@@ -9108,6 +9108,7 @@ mod tests {
         // after an element disappears, so absence checks need a clean frame.
         for (query, has_comments, comments_visible) in [
             ("", true, true),
+            ("a.rs", true, true),
             ("", true, false),
             ("a.rs", true, false),
             ("b.rs", true, false),
@@ -9144,7 +9145,7 @@ mod tests {
             });
             assert_eq!(
                 vcx.debug_bounds("file-comments-0").is_some(),
-                has_comments && query != "b.rs"
+                has_comments && comments_visible && query != "b.rs"
             );
             assert!(vcx.debug_bounds("file-comments-1").is_none());
         }
