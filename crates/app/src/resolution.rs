@@ -148,34 +148,7 @@ impl ReviewApp {
                         .child("Outdated"),
                 );
             }
-            if thread.is_resolved {
-                let expanded = item.is_some_and(|item| matches!(&item.state, ItemState::Ready(data) if data.expanded_threads.contains(&thread.id)));
-                let thread_id = thread.id.clone();
-                let entity = entity.clone();
-                controls = controls.child(
-                    div()
-                        .debug_selector(|| format!("thread-expand-{item_id}-{}", thread.id))
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "thread-expand-{item_id}-{}",
-                                thread.id
-                            )))
-                            .label(if expanded {
-                                "▾ Resolved"
-                            } else {
-                                "▸ Resolved"
-                            })
-                            .ghost()
-                            .xsmall()
-                            .disabled(self.composer().is_some())
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.toggle_thread_expanded(item_id, &thread_id, cx)
-                                })
-                            }),
-                        ),
-                );
-            } else {
+            if !thread.is_resolved {
                 controls = controls.child(
                     div()
                         .text_color(crate::theme::subtext(cx))

@@ -6,7 +6,7 @@ use crate::tree::status_style;
 use crate::{row_height, theme, ReviewApp, SPLIT_DIVIDER};
 use diff_core::{DiffRow, FileStatus, Hunk, PrDiff};
 use gpui::component::{
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     tag::Tag,
     tooltip::Tooltip,
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -1422,6 +1422,88 @@ fn render_row_content(
             top,
             collapsed,
         } => {
+            let header = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .w_full()
+                .h_full()
+                .when(*is_reply, |header| {
+                    header.pl(px(crate::threads::REPLY_INDENT))
+                })
+                .child(
+                    crate::threads::author_avatar(author, &entity.read(cx).account)
+                        // Header rows share the diff's zoom-dependent height.
+                        .with_size(px((crate::row_height() - 2.).min(20.)))
+                        .debug_selector(|| format!("inline-avatar-{comment_id}")),
+                )
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme::text(cx))
+                        .min_w_0()
+                        .truncate()
+                        .child(author.clone()),
+                )
+                .child(
+                    div()
+                        .id(("comment-time", ix))
+                        .debug_selector(|| format!("inline-comment-time-{comment_id}"))
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_color(theme::overlay0(cx))
+                        .text_size(px(11.))
+                        .child(when.clone())
+                        .when_some(timestamp.clone(), |label, timestamp| {
+                            label.tooltip(move |window, cx| {
+                                Tooltip::new(timestamp.clone()).build(window, cx)
+                            })
+                        }),
+                )
+                .child(div().flex_1());
+            let app = entity.read(cx);
+            let thread = (*top)
+                .then(|| {
+                    let projection = app.active_comment_projection()?;
+                    projection.thread_for_inline(projection.remote_id(*comment_id)?)
+                })
+                .flatten()
+                .filter(|thread| thread.is_resolved);
+            let header = if let Some(thread) = thread {
+                let item_id = app.active_item().unwrap().id;
+                let thread_id = thread.id.clone();
+                let entity = entity.clone();
+                Button::new(SharedString::from(format!(
+                    "inline-thread-toggle-{comment_id}"
+                )))
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .hover(theme::surface0(cx).into())
+                        .active(theme::surface0(cx).into()),
+                )
+                .xsmall()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .px_0()
+                .accessibility_label(if *collapsed {
+                    "Expand resolved thread"
+                } else {
+                    "Collapse resolved thread"
+                })
+                .disabled(app.composer().is_some())
+                .child(header)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.toggle_thread_expanded(item_id, &thread_id, cx)
+                    });
+                })
+                .into_any_element()
+            } else {
+                header.flex_1().into_any_element()
+            };
             comment_row(
                 div()
                     .flex()
@@ -1429,40 +1511,16 @@ fn render_row_content(
                     .gap_2()
                     .min_w_0()
                     .w_full()
-                    .when(*is_reply, |header| {
-                        header.pl(px(crate::threads::REPLY_INDENT))
-                    })
-                    .child(
-                        crate::threads::author_avatar(author, &entity.read(cx).account)
-                            // Header rows share the diff's zoom-dependent height.
-                            .with_size(px((crate::row_height() - 2.).min(20.)))
-                            .debug_selector(|| format!("inline-avatar-{comment_id}")),
-                    )
+                    .h_full()
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme::text(cx))
+                            .debug_selector(|| format!("inline-thread-header-{comment_id}"))
+                            .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .child(author.clone()),
+                            .h_full()
+                            .flex()
+                            .child(header),
                     )
-                    .child(
-                        div()
-                            .id(("comment-time", ix))
-                            .debug_selector(|| format!("inline-comment-time-{comment_id}"))
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_color(theme::overlay0(cx))
-                            .text_size(px(11.))
-                            .child(when.clone())
-                            .when_some(timestamp.clone(), |label, timestamp| {
-                                label.tooltip(move |window, cx| {
-                                    Tooltip::new(timestamp.clone()).build(window, cx)
-                                })
-                            }),
-                    )
-                    .child(div().flex_1())
                     .children(controls)
                     .into_any_element(),
                 *half,
