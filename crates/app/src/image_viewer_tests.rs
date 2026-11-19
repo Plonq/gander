@@ -183,10 +183,15 @@ fn oversized_conversation_images_reserve_only_their_scaled_height(cx: &mut gpui:
     for width in [1200., 800., 1600.] {
         vcx.simulate_resize(size(px(width), px(5000.)));
         draw_settled(&mut vcx);
+        let text = vcx.debug_bounds("conversation-0-text").unwrap();
         let mut previous: Option<gpui::Bounds<gpui::Pixels>> = None;
         for (offset, _) in body.match_indices("<img") {
             let selector = Box::leak(format!("conversation-0-image-{offset}").into_boxed_str());
             let bounds = vcx.debug_bounds(selector).unwrap();
+            assert!(
+                bounds.left() >= text.left() && bounds.right() <= text.right() + px(1.),
+                "image must fit the prose column: {bounds:?} in {text:?}"
+            );
             assert!(bounds.size.width < px(3024.));
             // The fake HTTP client returns 240x160 images. Use the decoded
             // aspect ratio, not potentially stale HTML height attributes.
@@ -200,11 +205,31 @@ fn oversized_conversation_images_reserve_only_their_scaled_height(cx: &mut gpui:
             }
             previous = Some(bounds);
         }
-        let text = vcx.debug_bounds("conversation-0-text").unwrap();
         assert!(
             text.bottom() - previous.unwrap().bottom() < px(32.),
             "no trailing image reservation: text={text:?}, last={previous:?}"
         );
+    }
+}
+
+#[gpui::test]
+fn oversized_images_following_prose_fit_the_conversation_column(cx: &mut gpui::TestAppContext) {
+    image_client(cx);
+    let body = "Before (master):\nThe Finances folder first, above the three widgets placed before it:\n<img width=\"1400\" height=\"900\" alt=\"screenshot\" src=\"https://github.com/user-attachments/assets/large\" />";
+    let offset = conversation::preprocess(body, "acme/widgets").find("<img").unwrap();
+    let selector = Box::leak(format!("conversation-0-image-{offset}").into_boxed_str());
+    let (window, _) = viewer_conversation(cx, body);
+    let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+    for width in [1200., 700., 1600.] {
+        vcx.simulate_resize(size(px(width), px(1600.)));
+        draw_settled(&mut vcx);
+        let text = vcx.debug_bounds("conversation-0-text").unwrap();
+        let image = vcx.debug_bounds(selector).unwrap();
+        assert!(
+            image.left() >= text.left() && image.right() <= text.right() + px(1.),
+            "image must fit the prose column: {image:?} in {text:?}"
+        );
+        assert!((image.size.height - image.size.width / 1.5).abs() < px(1.));
     }
 }
 
