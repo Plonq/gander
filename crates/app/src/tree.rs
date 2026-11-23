@@ -407,38 +407,46 @@ pub(crate) fn render_tree_row(
     let checkbox = |file_ix: usize| {
         let path = data.diff.files[file_ix].display_path();
         let state = data.viewed.state(path);
+        // GitHub does not track viewed state for every file in every diff
+        // (e.g. changes since the last review that were then reverted), so
+        // those files can never be marked viewed. Hide the checkbox rather
+        // than showing a disabled one that is indistinguishable from the
+        // transient disabling during gh activity.
+        let state = state?;
         let entity = entity.clone();
-        div()
-            .id(("viewed-control", file_ix))
-            .debug_selector(move || format!("viewed-{file_ix}"))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            // A checkbox click must never also open its file, including
-            // when disabled during a mutation or refresh.
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(
-                Checkbox::new(("file-viewed", file_ix))
-                    .xsmall()
-                    // Enlarge the control's hitbox, not its visual indicator.
-                    .size(px(TREE_ROW_HEIGHT))
-                    .items_center()
-                    .justify_center()
-                    .checked(state == Some(github::FileViewedState::Viewed))
-                    .disabled(
-                        reloading
-                            || state.is_none()
-                            || data.viewed.pending.contains(path)
-                            || data.viewed.uncertain.contains(path),
-                    )
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        entity.update(cx, |this, cx| {
-                            window.focus(&this.focus_handle, cx);
-                            this.toggle_file_viewed(file_ix, cx);
-                        });
-                    }),
-            )
+        Some(
+            div()
+                .id(("viewed-control", file_ix))
+                .debug_selector(move || format!("viewed-{file_ix}"))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                // A checkbox click must never also open its file, including
+                // when disabled during a mutation or refresh.
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Checkbox::new(("file-viewed", file_ix))
+                        .xsmall()
+                        // Enlarge the control's hitbox, not its visual indicator.
+                        .size(px(TREE_ROW_HEIGHT))
+                        .items_center()
+                        .justify_center()
+                        .checked(state == github::FileViewedState::Viewed)
+                        .disabled(
+                            reloading
+                                || data.viewed.pending.contains(path)
+                                || data.viewed.uncertain.contains(path),
+                        )
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| {
+                                window.focus(&this.focus_handle, cx);
+                                this.toggle_file_viewed(file_ix, cx);
+                            });
+                        }),
+                )
+                .into_any_element(),
+        )
     };
     let stats = |file: &FileDiff| {
         div()
@@ -533,7 +541,9 @@ pub(crate) fn render_tree_row(
                 })
                 .children(comments(file_ix))
                 .child(stats(file))
-                .when(data.pr_meta.is_some(), |row| row.child(checkbox(file_ix)))
+                .when(data.pr_meta.is_some(), |row| {
+                    row.when_some(checkbox(file_ix), |row, checkbox| row.child(checkbox))
+                })
                 .into_any_element()
             }
         }
