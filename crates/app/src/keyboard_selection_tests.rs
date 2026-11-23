@@ -375,3 +375,63 @@ fn line_navigation_ignores_non_code_views_and_clears_ranges_on_jumps(
         });
     });
 }
+
+#[gpui::test]
+fn copy_context_copies_location_and_lines_for_an_agent(cx: &mut gpui::TestAppContext) {
+    let (window, app) = queue_window(cx, FakePr::with_threads(Vec::new()));
+    let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+    install_item(&app, range_pr_item(), cx);
+    vcx.update(|window, cx| {
+        let focus = app.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    vcx.run_until_parked();
+    // A keyboard selection over the added lines copies the PR (with repo),
+    // the file, the source range, and the lines themselves.
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.jump(1, cx);
+            app.select_line(1, true, cx);
+            app.select_line(1, true, cx);
+        });
+    });
+    vcx.dispatch_action(CopyContext);
+    vcx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "acme/widgets#7, a.rs, lines R1-R3\n\none\ntwo\nthree"
+        );
+    });
+    // Split view: the selection's side keeps its own line numbers.
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            let data = app.active_data_mut().unwrap();
+            data.mode = ViewMode::Split;
+            data.set_rows(data.row_build());
+            data.selection = line_selection(&data.rows, SelSide::Right, 1, 3);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+    vcx.dispatch_action(CopyContext);
+    vcx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "acme/widgets#7, a.rs, lines R1-R3\n\none\ntwo\nthree"
+        );
+    });
+    // Without a selection the cursor names the line, like the comment flow.
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.jump(1, cx);
+        });
+    });
+    vcx.run_until_parked();
+    vcx.dispatch_action(CopyContext);
+    vcx.update(|_, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "acme/widgets#7, a.rs, line R1\n\none"
+        );
+    });
+}
