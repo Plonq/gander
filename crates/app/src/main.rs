@@ -6466,6 +6466,7 @@ impl ReviewApp {
             let entry = div()
                 .id(("item", ix))
                 .group("sidebar-item")
+                .debug_selector(move || format!("sidebar-item-{ix}"))
                 .mx_1()
                 .px_2()
                 .py_1()
@@ -6476,6 +6477,15 @@ impl ReviewApp {
                     entry.hover(|style| style.bg(Hsla::from(theme::surface0(cx)).opacity(0.5)))
                 })
                 .on_click(cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)))
+                // Middle click closes the tab, browser-style, without
+                // activating it.
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_item(ix, cx)
+                    }),
+                )
                 .child(
                     div()
                         .flex()
@@ -12158,6 +12168,46 @@ mod tests {
         draw_window(&mut vcx);
         assert!(vcx.debug_bounds("sidebar").is_none());
         assert!(vcx.debug_bounds("queue-table").is_some());
+    }
+
+    #[gpui::test]
+    fn middle_click_closes_a_sidebar_tab_without_activating_it(cx: &mut gpui::TestAppContext) {
+        let (window, app) = queue_window(cx, Arc::new(FakePr::default()));
+        install_item(&app, loop_pr_item(Vec::new()), cx);
+        let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let mut second = loop_pr_item(Vec::new());
+                second.id = 1;
+                app.items.push(second);
+                app.activate(0, window, cx);
+            })
+        });
+        draw_window(&mut vcx);
+        let first = vcx.debug_bounds("sidebar-item-0").unwrap().center();
+        let second = vcx.debug_bounds("sidebar-item-1").unwrap().center();
+
+        // Middle click on the background tab closes it and keeps the
+        // active tab active.
+        vcx.simulate_mouse_down(second, MouseButton::Middle, gpui::Modifiers::default());
+        vcx.simulate_mouse_up(second, MouseButton::Middle, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.items.len(), 1);
+            assert_eq!(app.active, 0);
+        });
+
+        // Middle click on the active tab closes it too, and the last tab's
+        // close comes home to the queue.
+        vcx.simulate_mouse_down(first, MouseButton::Middle, gpui::Modifiers::default());
+        vcx.simulate_mouse_up(first, MouseButton::Middle, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(app.items.is_empty());
+            assert!(app.show_queue);
+        });
     }
 
     #[gpui::test]
