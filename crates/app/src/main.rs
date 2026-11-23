@@ -9398,7 +9398,15 @@ mod tests {
                 vcx.update(|window, cx| {
                     let _ = window.draw(cx);
                 });
-                let bounds = vcx.debug_bounds("viewed-1").unwrap();
+                let bounds = vcx.debug_bounds("viewed-1");
+                if disabled == "unknown" {
+                    // A file GitHub does not track (e.g. its changes since the
+                    // last review were reverted) can never be marked viewed:
+                    // its checkbox is hidden, not disabled.
+                    assert!(bounds.is_none(), "checkbox must be hidden");
+                    continue;
+                }
+                let bounds = bounds.unwrap();
                 assert_eq!(bounds.size.width, px(24.));
                 assert_eq!(bounds.size.height, px(24.));
                 // Each corner is outside the small, centered visual indicator.
