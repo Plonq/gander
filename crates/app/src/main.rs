@@ -258,6 +258,7 @@ actions!(
         QueueClearFilters,
         ClearSelection,
         CopySelection,
+        CopyContext,
         FocusTreeFilter,
         ToggleMinimap,
         ToggleComments,
@@ -518,6 +519,10 @@ fn main() {
                 // Selection: escape/cmd-c only fire while the diff pane has focus.
                 KeyBinding::new("escape", ClearSelection, Some("ReviewApp")),
                 KeyBinding::new("cmd-c", CopySelection, Some("ReviewApp")),
+                // ⌘⇧C copies the location plus the selected lines: what an
+                // agent outside the app needs to answer a question about
+                // what you're looking at.
+                KeyBinding::new("cmd-shift-c", CopyContext, Some("ReviewApp")),
                 KeyBinding::new("ctrl-tab", NextItem, Some("ReviewApp")),
                 KeyBinding::new("ctrl-shift-tab", PrevItem, Some("ReviewApp")),
                 // Zoom. Bind both "cmd-=" and "cmd-+" so it fires with or
@@ -1970,6 +1975,35 @@ fn local_comment_location(file: &str, side: CommentSide, line: Option<u64>) -> S
     match side {
         CommentSide::Left => format!("{file}:L{line}"),
         CommentSide::Right => format!("{file}:R{line}"),
+    }
+}
+
+/// How a copied location names its review: a PR by repo and number, a local
+/// diff by the same labels its review prompt uses.
+fn review_label(source: &Source) -> String {
+    match source {
+        Source::Pr(loc) => format!("{}#{}", loc.repo_slug(), loc.number),
+        Source::Local(src) => format!("Diff: {} ← {}", src.base_label, src.branch),
+    }
+}
+
+/// The selected source lines as a copyable range, one side's line number per
+/// endpoint — the `path:L12` convention the local prompt already uses.
+fn line_range_label(points: &[(CommentSide, u64)]) -> Option<String> {
+    let letter = |side: CommentSide| match side {
+        CommentSide::Left => "L",
+        CommentSide::Right => "R",
+    };
+    match points {
+        [] => None,
+        [(side, line)] => Some(format!("line {}{}", letter(*side), line)),
+        [start, .., end] => Some(format!(
+            "lines {}{}-{}{}",
+            letter(start.0),
+            start.1,
+            letter(end.0),
+            end.1
+        )),
     }
 }
 
@@ -4773,6 +4807,61 @@ impl ReviewApp {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(local_review_prompt(src, local)));
+    }
+
+    /// Copy what an agent outside the app needs to answer a question about
+    /// the selection: the review (PR with repo, or the local diff's labels),
+    /// the file, the source line range, and the selected lines themselves.
+    /// Without a selection the keyboard cursor names the line, like the
+    /// comment flow.
+    fn copy_context(&self, cx: &mut Context<Self>) {
+        let Some(item) = self.active_item() else {
+            return;
+        };
+        let ItemState::Ready(data) = &item.state else {
+            return;
+        };
+        let Some(file) = data.diff.files.get(data.file_ix) else {
+            return;
+        };
+        let (points, text) = match data.selection {
+            Some(sel) => (
+                sel.comment_points(&data.rows),
+                selection_text(&sel, &data.rows),
+            ),
+            None => {
+                let Some(point) = (match data.cursor_side {
+                    Some(side) => comment_anchor(&data.rows, data.cursor, side),
+                    None => cursor_anchor(&data.rows, data.cursor),
+                }) else {
+                    return;
+                };
+                // The anchor names a source line; its side together with the
+                // view mode says which cell holds that line's text.
+                let text_side = match (point.0, data.mode) {
+                    (CommentSide::Left, ViewMode::Split) => SelSide::Left,
+                    (CommentSide::Left, _) => SelSide::Unified,
+                    (_, ViewMode::Split) => SelSide::Right,
+                    (_, _) => SelSide::Unified,
+                };
+                let text = line_selection(&data.rows, text_side, data.cursor, data.cursor)
+                    .map(|sel| selection_text(&sel, &data.rows))
+                    .unwrap_or_default();
+                (vec![point], text)
+            }
+        };
+        if points.is_empty() && text.is_empty() {
+            return;
+        }
+        let mut body = format!("{}, {}", review_label(&item.source), file.display_path());
+        if let Some(lines) = line_range_label(&points) {
+            body.push_str(&format!(", {lines}"));
+        }
+        if !text.is_empty() {
+            body.push_str("\n\n");
+            body.push_str(&text);
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(body));
     }
 
     /// Refetch the published discussion (not meta/patch), regroup, and
@@ -7829,6 +7918,7 @@ impl Render for ReviewApp {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }))
+            .on_action(cx.listener(|this, _: &CopyContext, _, cx| this.copy_context(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1., false, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1., false, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(0., true, cx)))
@@ -14527,6 +14617,43 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].root.body, "please simplify this");
         assert_eq!(threads[0].replies[0].body, "also add a test");
+    }
+
+    #[test]
+    fn review_label_names_prs_and_local_diffs() {
+        assert_eq!(review_label(&Source::Pr(loop_loc())), "acme/widgets#7");
+        let src = git::LocalSource {
+            repo_root: "/tmp/myrepo".into(),
+            branch: "feature".into(),
+            base_ref: None,
+            base_label: "upstream/main".into(),
+            base_oid: None,
+        };
+        assert_eq!(
+            review_label(&Source::Local(src)),
+            "Diff: upstream/main ← feature"
+        );
+    }
+
+    #[test]
+    fn line_range_label_marks_sides_per_endpoint() {
+        use threads::CommentSide::{Left, Right};
+        assert_eq!(line_range_label(&[]), None);
+        assert_eq!(line_range_label(&[(Right, 3)]), Some("line R3".into()));
+        assert_eq!(
+            line_range_label(&[(Right, 3), (Right, 10)]),
+            Some("lines R3-R10".into())
+        );
+        // A unified char selection can start on a removal and end on an
+        // addition: both endpoints keep their own side's line number.
+        assert_eq!(
+            line_range_label(&[(Left, 3), (Right, 10)]),
+            Some("lines L3-R10".into())
+        );
+        assert_eq!(
+            line_range_label(&[(Left, 3), (Left, 4), (Right, 10)]),
+            Some("lines L3-R10".into())
+        );
     }
 
     #[test]
