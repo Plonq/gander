@@ -402,16 +402,21 @@ mod tests {
     fn admission_is_bounded_and_queued_deadlines_expire_without_spawning() {
         let slots = Arc::new(ReadSlots::new(2));
         let barrier = Arc::new(Barrier::new(3));
+        let release = Arc::new(Barrier::new(3));
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 let slots = slots.clone();
                 let barrier = barrier.clone();
+                let release = release.clone();
                 scope.spawn(move || {
                     let _permit = slots
                         .acquire(Instant::now() + Duration::from_secs(2))
                         .unwrap();
                     barrier.wait();
-                    std::thread::sleep(Duration::from_millis(150));
+                    // Hold the permit until the main thread has finished its
+                    // assertions instead of for a wall-clock sleep, so a
+                    // starved runner cannot let it slip out early.
+                    release.wait();
                 });
             }
             barrier.wait();
@@ -429,6 +434,7 @@ mod tests {
             );
             assert!(!marker.exists());
             assert_eq!(*slots.active.lock().unwrap(), 2);
+            release.wait();
         });
         assert_eq!(*slots.active.lock().unwrap(), 0);
         assert!(run_inner(
