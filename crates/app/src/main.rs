@@ -43,7 +43,7 @@ mod window_size;
 #[cfg(test)]
 mod test_util;
 
-use chrome::{app_title, centered_message};
+use chrome::{app_title, centered_message, happy_goose};
 use comment_actions::CommentTarget;
 #[cfg(test)]
 use diff_core::FileStatus;
@@ -6847,14 +6847,11 @@ impl ReviewApp {
                     )
                     .into_any_element();
             }
-            return centered_message(
-                if queue.search.is_past_reviews() {
-                    "no past reviews".into()
-                } else {
-                    "no PRs awaiting your review".into()
-                },
-                theme::overlay0(cx),
-            );
+            if queue.search.is_past_reviews() {
+                return centered_message("no past reviews".into(), theme::overlay0(cx));
+            }
+            // The one empty state worth celebrating.
+            return happy_goose("no PRs awaiting your review".into(), cx);
         }
         let entity = cx.entity();
         let now = now_unix();
