@@ -4,8 +4,10 @@ use crate::{ReviewApp, APP_HEADER_HEIGHT};
 use gpui::component::{button::Button, Sizable, WindowExt};
 use gpui::{
     div, img, point, prelude::*, px, size, Context, FocusHandle, KeyDownEvent, MouseButton,
-    MouseMoveEvent, Pixels, Point, Resource, SharedString, SharedUri, Size, StyledImage, Window,
+    MouseMoveEvent, Pixels, Point, RenderImage, Resource, SharedString, SharedUri, Size,
+    StyledImage, Window,
 };
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ImageTarget {
@@ -67,6 +69,9 @@ pub(crate) struct ImageViewer {
     pub target: ImageTarget,
     pub item_id: u64,
     pub video: Option<crate::video::Origin>,
+    /// Mermaid diagrams are rasterized in-process: expand the pixels already
+    /// in the cache rather than inventing a URL for the network loader.
+    pub diagram: Option<Arc<RenderImage>>,
     focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
     pub transform: Transform,
@@ -88,7 +93,28 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_media(target, item_id, None, window, cx);
+        self.open_media(target, item_id, None, None, window, cx);
+    }
+
+    pub(crate) fn open_diagram(
+        &mut self,
+        image: Arc<RenderImage>,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_media(
+            ImageTarget {
+                url: "".into(),
+                alt: "Mermaid diagram".into(),
+                link: None,
+            },
+            item_id,
+            None,
+            Some(image),
+            window,
+            cx,
+        );
     }
 
     fn open_media(
@@ -96,6 +122,7 @@ impl ReviewApp {
         target: ImageTarget,
         item_id: u64,
         video: Option<crate::video::Origin>,
+        diagram: Option<Arc<RenderImage>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -127,6 +154,7 @@ impl ReviewApp {
             target,
             item_id,
             video,
+            diagram,
             focus,
             previous_focus,
             transform: Transform::default(),
@@ -169,6 +197,7 @@ impl ReviewApp {
             },
             item_id,
             Some(origin),
+            None,
             window,
             cx,
         );
@@ -225,9 +254,12 @@ impl ReviewApp {
             return None;
         }
         let is_video = viewer.video.is_some();
+        let is_diagram = viewer.diagram.is_some();
         let resource = Resource::Uri(viewer.target.url.clone());
         let loaded = if is_video {
             None
+        } else if let Some(image) = viewer.diagram.clone() {
+            Some(Ok(image))
         } else {
             window.use_asset::<crate::svg_image::ImageLoader>(&resource, cx)
         };
@@ -521,13 +553,15 @@ impl ReviewApp {
                                         .on_click(move |_, _, cx| cx.open_url(&link)),
                                 ))
                             })
-                            .child(control(
-                                "viewer-browser",
-                                Button::new("viewer-browser")
-                                    .label("Open image in browser")
-                                    .small()
-                                    .on_click(move |_, _, cx| cx.open_url(url.as_ref())),
-                            ))
+                            .when(!is_diagram, |bar| {
+                                bar.child(control(
+                                    "viewer-browser",
+                                    Button::new("viewer-browser")
+                                        .label("Open image in browser")
+                                        .small()
+                                        .on_click(move |_, _, cx| cx.open_url(url.as_ref())),
+                                ))
+                            })
                             .child(control(
                                 "viewer-close",
                                 Button::new("viewer-close")

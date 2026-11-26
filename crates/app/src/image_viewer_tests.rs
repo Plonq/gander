@@ -171,6 +171,58 @@ fn image_viewer_zoom_drag_resize_fit_and_all_dismissals(cx: &mut gpui::TestAppCo
 }
 
 #[gpui::test]
+fn mermaid_diagrams_expand_into_the_media_viewer(cx: &mut gpui::TestAppContext) {
+    image_client(cx);
+    let (window, app) = viewer_conversation(
+        cx,
+        "```mermaid\nflowchart LR\nA[Review] --> B[Respond]\n```",
+    );
+    let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+    vcx.simulate_resize(size(px(1200.), px(800.)));
+    draw_settled(&mut vcx);
+    let inline = vcx.debug_bounds("conversation-0-mermaid-0-diagram").unwrap();
+    click_selector(&mut vcx, "conversation-0-mermaid-0-diagram");
+    let overlay = vcx.debug_bounds("image-viewer").unwrap();
+    let expanded = vcx.debug_bounds("viewer-image").unwrap();
+    assert!(expanded.size.width >= inline.size.width);
+    assert!(
+        expanded.right() <= overlay.right() && expanded.bottom() <= overlay.bottom(),
+        "expanded diagram must stay inside the viewer: {expanded:?} in {overlay:?}"
+    );
+    assert!(vcx.debug_bounds("viewer-loading").is_none());
+    assert!(vcx.debug_bounds("viewer-error").is_none());
+    // The raster is already in memory: there is no URL to follow or open.
+    assert!(vcx.debug_bounds("viewer-browser").is_none());
+    assert!(cx.opened_url().is_none());
+    cx.update(|cx| {
+        let viewer = app.read(cx).image_viewer.as_ref().unwrap();
+        assert!(viewer.diagram.is_some());
+        assert!(viewer.video.is_none());
+        assert_eq!(viewer.target.link, None);
+    });
+    click_selector(&mut vcx, "viewer-in");
+    cx.update(|cx| {
+        assert!(app.read(cx).image_viewer.as_ref().unwrap().transform.zoom > 1.);
+    });
+    click_selector(&mut vcx, "viewer-close");
+    assert!(vcx.debug_bounds("image-viewer").is_none());
+    // The inline card is untouched by inspection: its controls still work.
+    click_selector(&mut vcx, "conversation-0-mermaid-0-source-toggle");
+    draw_settled(&mut vcx);
+    assert!(vcx.debug_bounds("conversation-0-mermaid-0-source-view").is_some());
+    assert!(vcx.debug_bounds("conversation-0-mermaid-0-diagram").is_none());
+    let content = vcx
+        .debug_bounds("conversation-0-mermaid-0-source-view")
+        .unwrap();
+    vcx.simulate_click(content.center(), Default::default());
+    draw_settled(&mut vcx);
+    assert!(
+        vcx.debug_bounds("image-viewer").is_none(),
+        "source mode has no diagram to expand"
+    );
+}
+
+#[gpui::test]
 fn oversized_conversation_images_reserve_only_their_scaled_height(cx: &mut gpui::TestAppContext) {
     image_client(cx);
     // Large screenshots appear as adjacent image tags in the conversation.

@@ -615,6 +615,7 @@ pub(crate) fn render_view(
     };
     let extensions = MarkdownExtensions::default()
         .plugin(mermaid::MermaidPlugin {
+            owner: cx.entity().downgrade(),
             host: id.to_owned().into(),
         })
         .plugin(video.clone())
