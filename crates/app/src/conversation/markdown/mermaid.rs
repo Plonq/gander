@@ -7,7 +7,7 @@ use gpui::component::{
 };
 use gpui::{
     div, img, prelude::*, px, App, ClipboardItem, Context, Entity, Global, MouseButton,
-    RenderImage, SharedString, Window,
+    RenderImage, SharedString, WeakEntity, Window,
 };
 use markdown::mdast::Node;
 use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
@@ -17,6 +17,8 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
+
+use crate::ReviewApp;
 
 const REVISION: u8 = 4;
 const FONT: &str = "Arial";
@@ -32,6 +34,7 @@ const DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(super) struct MermaidPlugin {
+    pub owner: WeakEntity<ReviewApp>,
     pub host: SharedString,
 }
 
@@ -290,6 +293,8 @@ impl MarkdownPlugin for MermaidPlugin {
                             .child(source_view()),
                     )
                 } else {
+                    let owner = self.owner.clone();
+                    let image = diagram.image.clone();
                     card.child(
                         img(diagram.image)
                             .id("diagram")
@@ -301,6 +306,21 @@ impl MarkdownPlugin for MermaidPlugin {
                             .inset_0()
                             .size_full()
                             .object_fit(gpui::ObjectFit::Contain)
+                            // Expanding mirrors images: the gesture owns the
+                            // click and never starts prose/selection drags.
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                let _ = owner.update(cx, |app, cx| {
+                                    if let Some(item_id) = app.active_item().map(|item| item.id) {
+                                        app.open_diagram(image.clone(), item_id, window, cx);
+                                    }
+                                });
+                            })
                             .with_fallback(|| {
                                 div()
                                     .child("Diagram image unavailable — use Source")
@@ -1068,6 +1088,7 @@ mod tests {
             Arc::new(
                 MarkdownExtensions::default()
                     .plugin(MermaidPlugin {
+                        owner: WeakEntity::new_invalid(),
                         host: "test".into(),
                     })
                     .parser_revision(3),
